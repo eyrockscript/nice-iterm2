@@ -5,191 +5,147 @@
 #  source /path/to/pipboy-prompt.sh
 # ============================================================================
 
-# Colors (Pip-Boy Green)
-GREEN='\033[38;2;26;255;89m'
-DIM_GREEN='\033[38;2;13;128;45m'
-BRIGHT_GREEN='\033[38;2;51;255;128m'
-RESET='\033[0m'
-
-# Get system stats
-get_cpu_usage() {
+# Get system stats (cached for performance)
+_pipboy_get_stats() {
+    # CPU
     if [[ "$OSTYPE" == "darwin"* ]]; then
-        top -l 1 -s 0 | grep "CPU usage" | awk '{print $3}' | tr -d '%'
+        _PB_CPU=$(ps -A -o %cpu | awk '{s+=$1} END {printf "%.0f", s/8}' 2>/dev/null || echo "0")
     else
-        grep 'cpu ' /proc/stat | awk '{usage=($2+$4)*100/($2+$4+$5)} END {printf "%.0f", usage}'
+        _PB_CPU=$(grep 'cpu ' /proc/stat | awk '{usage=($2+$4)*100/($2+$4+$5)} END {printf "%.0f", usage}' 2>/dev/null || echo "0")
     fi
-}
 
-get_memory_usage() {
+    # Memory
     if [[ "$OSTYPE" == "darwin"* ]]; then
-        memory_pressure 2>/dev/null | grep "System-wide memory free percentage:" | awk '{print 100-$5}' | tr -d '%' || \
-        vm_stat | awk '
-            /Pages active/ {active=$3}
-            /Pages wired/ {wired=$4}
-            /Pages free/ {free=$3}
-            END {
-                used = (active + wired) * 4096 / 1073741824
-                total_approx = (active + wired + free) * 4096 / 1073741824
-                printf "%.0f", (used/total_approx)*100
-            }
-        ' | tr -d '.'
+        _PB_MEM=$(ps -A -o %mem | awk '{s+=$1} END {printf "%.0f", s}' 2>/dev/null || echo "0")
     else
-        free | awk '/Mem:/ {printf "%.0f", $3/$2 * 100}'
+        _PB_MEM=$(free | awk '/Mem:/ {printf "%.0f", $3/$2 * 100}' 2>/dev/null || echo "0")
     fi
-}
 
-get_disk_usage() {
-    df -h / | awk 'NR==2 {print $5}' | tr -d '%'
-}
+    # Disk
+    _PB_DISK=$(df -h / 2>/dev/null | awk 'NR==2 {gsub(/%/,""); print $5}' || echo "0")
 
-get_battery() {
+    # Battery
     if [[ "$OSTYPE" == "darwin"* ]]; then
-        pmset -g batt 2>/dev/null | grep -Eo "\d+%" | tr -d '%' || echo "AC"
+        _PB_BATT=$(pmset -g batt 2>/dev/null | grep -Eo '[0-9]+%' | tr -d '%' || echo "100")
     else
-        cat /sys/class/power_supply/BAT0/capacity 2>/dev/null || echo "AC"
+        _PB_BATT=$(cat /sys/class/power_supply/BAT0/capacity 2>/dev/null || echo "100")
     fi
+
+    # Ensure numeric
+    [[ ! "$_PB_CPU" =~ ^[0-9]+$ ]] && _PB_CPU=0
+    [[ ! "$_PB_MEM" =~ ^[0-9]+$ ]] && _PB_MEM=0
+    [[ ! "$_PB_DISK" =~ ^[0-9]+$ ]] && _PB_DISK=0
+    [[ ! "$_PB_BATT" =~ ^[0-9]+$ ]] && _PB_BATT=100
 }
 
-get_uptime_short() {
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        uptime | awk -F'up ' '{print $2}' | awk -F',' '{print $1}' | xargs
-    else
-        uptime -p | sed 's/up //'
-    fi
+# Progress bar (simple)
+_pipboy_bar() {
+    local pct=$1
+    local len=10
+    local filled=$((pct * len / 100))
+    local empty=$((len - filled))
+    printf '%.0s█' $(seq 1 $filled 2>/dev/null)
+    printf '%.0s░' $(seq 1 $empty 2>/dev/null)
 }
 
-# Progress bar function
-progress_bar() {
-    local percent=$1
-    local width=15
-    local filled=$((percent * width / 100))
-    local empty=$((width - filled))
-
-    printf "["
-    printf "%${filled}s" | tr ' ' '='
-    printf "%${empty}s" | tr ' ' '-'
-    printf "]"
-}
-
-# Display the Pip-Boy interface
+# Full Pip-Boy display
 pipboy_display() {
-    local cpu=$(get_cpu_usage 2>/dev/null || echo "0")
-    local mem=$(get_memory_usage 2>/dev/null || echo "0")
-    local disk=$(get_disk_usage 2>/dev/null || echo "0")
-    local batt=$(get_battery 2>/dev/null || echo "100")
-    local uptime_str=$(get_uptime_short 2>/dev/null || echo "N/A")
-    local hostname=$(hostname -s)
+    _pipboy_get_stats
     local user=$(whoami)
+    local host=$(hostname -s)
+    local G=$'\033[38;5;46m'      # Bright green
+    local D=$'\033[38;5;22m'      # Dark green
+    local R=$'\033[0m'            # Reset
 
-    # Ensure numeric values
-    [[ ! "$cpu" =~ ^[0-9]+$ ]] && cpu=0
-    [[ ! "$mem" =~ ^[0-9]+$ ]] && mem=0
-    [[ ! "$disk" =~ ^[0-9]+$ ]] && disk=0
-    [[ ! "$batt" =~ ^[0-9]+$ ]] && batt=100
-
-    echo -e "${GREEN}"
-    cat << 'VAULT'
-    ╔══════════════════════════════════════════════════════════════════════╗
-    ║  ╔═══════╗  ╔═══════╗  ╔═══════╗  ╔═══════╗  ╔═══════╗              ║
-    ║  ║ STAT  ║  ║  INV  ║  ║ DATA  ║  ║  MAP  ║  ║ RADIO ║              ║
-    ║  ╚═══════╝  ╚═══════╝  ╚═══════╝  ╚═══════╝  ╚═══════╝              ║
-    ╠══════════════════════════════════════════════════════════════════════╣
-VAULT
-
-    # Vault Boy ASCII art with stats
-    echo -e "    ║                                                                      ║"
-    echo -e "    ║              ${BRIGHT_GREEN}    ██████╗ ██╗██████╗       ██████╗  ██████╗ ██╗   ██╗${GREEN}    ║"
-    echo -e "    ║              ${BRIGHT_GREEN}    ██╔══██╗██║██╔══██╗      ██╔══██╗██╔═══██╗╚██╗ ██╔╝${GREEN}    ║"
-    echo -e "    ║              ${BRIGHT_GREEN}    ██████╔╝██║██████╔╝█████╗██████╔╝██║   ██║ ╚████╔╝${GREEN}     ║"
-    echo -e "    ║              ${BRIGHT_GREEN}    ██╔═══╝ ██║██╔═══╝ ╚════╝██╔══██╗██║   ██║  ╚██╔╝${GREEN}      ║"
-    echo -e "    ║              ${BRIGHT_GREEN}    ██║     ██║██║           ██████╔╝╚██████╔╝   ██║${GREEN}       ║"
-    echo -e "    ║              ${BRIGHT_GREEN}    ╚═╝     ╚═╝╚═╝           ╚═════╝  ╚═════╝    ╚═╝${GREEN}       ║"
-    echo -e "    ║                                                                      ║"
-    echo -e "    ║                        ${BRIGHT_GREEN}     ,---.${GREEN}                                  ║"
-    echo -e "    ║                        ${BRIGHT_GREEN}    /     \\${GREEN}                                 ║"
-    echo -e "    ║                        ${BRIGHT_GREEN}    | o o |${GREEN}                                 ║"
-    echo -e "    ║                        ${BRIGHT_GREEN}    |  >  |${GREEN}                                 ║"
-    echo -e "    ║                        ${BRIGHT_GREEN}     \\___/${GREEN}                                  ║"
-    echo -e "    ║                        ${BRIGHT_GREEN}    /|   |\\${GREEN}                                 ║"
-    echo -e "    ║                        ${BRIGHT_GREEN}   / |   | \\${GREEN}                                ║"
-    echo -e "    ║                        ${BRIGHT_GREEN}      | |${GREEN}                                   ║"
-    echo -e "    ║                        ${BRIGHT_GREEN}     /   \\${GREEN}                                  ║"
-    echo -e "    ║                                                                      ║"
-    printf "    ║                           ${BRIGHT_GREEN}%-20s${GREEN}                      ║\n" "$user@$hostname"
-    echo -e "    ║                                                                      ║"
-    echo -e "    ╠══════════════════════════════════════════════════════════════════════╣"
-
-    # Status bars (like HP, Level, AP but with system stats)
-    printf "    ║  ${BRIGHT_GREEN}CPU${GREEN} %3s%%  $(progress_bar $cpu)  " "$cpu"
-    printf "${BRIGHT_GREEN}MEM${GREEN} %3s%%  $(progress_bar $mem)  " "$mem"
-    printf "${BRIGHT_GREEN}DISK${GREEN} %3s%% $(progress_bar $disk)  ║\n" "$disk"
-
-    echo -e "    ╠══════════════════════════════════════════════════════════════════════╣"
-    printf "    ║  ${BRIGHT_GREEN}BATT${GREEN} %3s%%            ${BRIGHT_GREEN}UPTIME${GREEN} %-20s              ║\n" "$batt" "$uptime_str"
-    echo -e "    ╚══════════════════════════════════════════════════════════════════════╝"
-    echo -e "${RESET}"
+    echo ""
+    echo "${G}╔════════════════════════════════════════════════════════════════╗${R}"
+    echo "${G}║${D}  STAT     INV     DATA     MAP     RADIO                      ${G}║${R}"
+    echo "${G}╠════════════════════════════════════════════════════════════════╣${R}"
+    echo "${G}║                                                                ║${R}"
+    echo "${G}║                         ${G}██████╗ ██╗██████╗ ${D} ██████╗  ██████╗ ██╗   ██╗${G}  ║${R}"
+    echo "${G}║                         ${G}██╔══██╗██║██╔══██╗${D} ██╔══██╗██╔═══██╗╚██╗ ██╔╝${G}  ║${R}"
+    echo "${G}║                         ${G}██████╔╝██║██████╔╝${D} ██████╔╝██║   ██║ ╚████╔╝ ${G}  ║${R}"
+    echo "${G}║                         ${G}██╔═══╝ ██║██╔═══╝ ${D} ██╔══██╗██║   ██║  ╚██╔╝  ${G}  ║${R}"
+    echo "${G}║                         ${G}██║     ██║██║     ${D} ██████╔╝╚██████╔╝   ██║   ${G}  ║${R}"
+    echo "${G}║                         ${G}╚═╝     ╚═╝╚═╝     ${D} ╚═════╝  ╚═════╝    ╚═╝   ${G}  ║${R}"
+    echo "${G}║                                                                ║${R}"
+    echo "${G}║                            ${G}⣀⣀⣀⣀⣀⣀⣀${R}                            ${G}║${R}"
+    echo "${G}║                          ${G}⣿⣿⣿⣿⣿⣿⣿⣿⣿${R}                          ${G}║${R}"
+    echo "${G}║                          ${G}⣿⣿${R}⬤${G}⣿⣿⣿${R}⬤${G}⣿⣿${R}                          ${G}║${R}"
+    echo "${G}║                          ${G}⣿⣿⣿⣿⣿⣿⣿⣿⣿${R}                          ${G}║${R}"
+    echo "${G}║                          ${G}⣿⣿⣿${R}⌣⌣⌣${G}⣿⣿⣿${R}                          ${G}║${R}"
+    echo "${G}║                            ${G}⣿⣿⣿⣿⣿⣿⣿${R}                            ${G}║${R}"
+    echo "${G}║                          ${G}⣿⣿${R}       ${G}⣿⣿${R}                          ${G}║${R}"
+    echo "${G}║                          ${G}⣿⣿⣿⣿⣿⣿⣿⣿⣿${R}                          ${G}║${R}"
+    echo "${G}║                            ${G}⣿⣿${R}   ${G}⣿⣿${R}                            ${G}║${R}"
+    echo "${G}║                           ${G}⣿⣿${R}     ${G}⣿⣿${R}                           ${G}║${R}"
+    echo "${G}║                                                                ║${R}"
+    printf "${G}║                        ${G}%-20s${G}                    ║${R}\n" "$user@$host"
+    echo "${G}║                                                                ║${R}"
+    echo "${G}╠════════════════════════════════════════════════════════════════╣${R}"
+    printf "${G}║  ${G}CPU ${G}%3s%% ${D}$(_pipboy_bar $_PB_CPU)${G}  MEM ${G}%3s%% ${D}$(_pipboy_bar $_PB_MEM)${G}  DISK ${G}%3s%% ${D}$(_pipboy_bar $_PB_DISK)${G} ║${R}\n" "$_PB_CPU" "$_PB_MEM" "$_PB_DISK"
+    echo "${G}╠════════════════════════════════════════════════════════════════╣${R}"
+    printf "${G}║  ${G}BATT ${G}%3s%%                                                   ║${R}\n" "$_PB_BATT"
+    echo "${G}╚════════════════════════════════════════════════════════════════╝${R}"
+    echo ""
 }
 
-# Simpler prompt for everyday use
-pipboy_prompt() {
-    local cpu=$(get_cpu_usage 2>/dev/null || echo "0")
-    local mem=$(get_memory_usage 2>/dev/null || echo "0")
-    local disk=$(get_disk_usage 2>/dev/null || echo "0")
-
-    [[ ! "$cpu" =~ ^[0-9]+$ ]] && cpu=0
-    [[ ! "$mem" =~ ^[0-9]+$ ]] && mem=0
-    [[ ! "$disk" =~ ^[0-9]+$ ]] && disk=0
-
-    local dir=$(basename "$PWD")
+# Simple prompt
+pipboy_simple_prompt() {
+    _pipboy_get_stats
+    local dir="${PWD##*/}"
     [[ "$PWD" == "$HOME" ]] && dir="~"
 
-    echo -e "${DIM_GREEN}┌─[${GREEN}CPU:${cpu}%${DIM_GREEN}]─[${GREEN}MEM:${mem}%${DIM_GREEN}]─[${GREEN}DISK:${disk}%${DIM_GREEN}]${RESET}"
-    echo -e "${DIM_GREEN}└─[${BRIGHT_GREEN}${dir}${DIM_GREEN}]─▶${RESET} "
+    # For display
+    local G=$'\033[38;5;46m'
+    local D=$'\033[38;5;22m'
+    local R=$'\033[0m'
+
+    echo "${D}┌─[${G}CPU:${_PB_CPU}%${D}]─[${G}MEM:${_PB_MEM}%${D}]─[${G}DSK:${_PB_DISK}%${D}]─[${G}BAT:${_PB_BATT}%${D}]${R}"
+    echo "${D}└─[${G}${dir}${D}]▶${R} "
 }
 
-# Function to show full Pip-Boy (call with 'pipboy' command)
+# ZSH prompt
+_pipboy_zsh_prompt() {
+    _pipboy_get_stats
+    local dir="${PWD##*/}"
+    [[ "$PWD" == "$HOME" ]] && dir="~"
+
+    # ZSH prompt colors
+    local G='%F{46}'   # Green
+    local D='%F{22}'   # Dark green
+    local R='%f'       # Reset
+
+    echo "${D}┌─[${G}CPU:${_PB_CPU}%%${D}]─[${G}MEM:${_PB_MEM}%%${D}]─[${G}DSK:${_PB_DISK}%%${D}]─[${G}BAT:${_PB_BATT}%%${D}]${R}"
+    echo "${D}└─[${G}${dir}${D}]▶${R} "
+}
+
+# Commands
 pipboy() {
     clear
     pipboy_display
 }
 
-# MOTD - Show on terminal start
-pipboy_motd() {
-    pipboy_display
-    echo ""
-}
-
 # ============================================================================
-# ZSH Configuration
+# Shell Configuration
 # ============================================================================
 if [[ -n "$ZSH_VERSION" ]]; then
-    # Use precmd for prompt
+    setopt PROMPT_SUBST
     precmd() {
-        PROMPT="$(pipboy_prompt)"
+        PROMPT="$(_pipboy_zsh_prompt)"
     }
-
-    # Show MOTD on first load
+    # Show on first load
     if [[ -z "$PIPBOY_LOADED" ]]; then
         export PIPBOY_LOADED=1
-        pipboy_motd
+        pipboy_display
+    fi
+elif [[ -n "$BASH_VERSION" ]]; then
+    PROMPT_COMMAND='PS1="$(pipboy_simple_prompt)"'
+    if [[ -z "$PIPBOY_LOADED" ]]; then
+        export PIPBOY_LOADED=1
+        pipboy_display
     fi
 fi
 
-# ============================================================================
-# BASH Configuration
-# ============================================================================
-if [[ -n "$BASH_VERSION" ]]; then
-    PROMPT_COMMAND='PS1="$(pipboy_prompt)"'
-
-    # Show MOTD on first load
-    if [[ -z "$PIPBOY_LOADED" ]]; then
-        export PIPBOY_LOADED=1
-        pipboy_motd
-    fi
-fi
-
-# ============================================================================
-# Alias for quick access
-# ============================================================================
 alias vault='pipboy'
 alias stats='pipboy_display'
